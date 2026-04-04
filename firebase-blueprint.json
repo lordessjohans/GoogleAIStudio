@@ -1,0 +1,58 @@
+{
+  "entities": {
+    "Lead": {
+      "title": "Lead",
+      "description": "A user who has requested access via the landing page.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "The full name of the lead."
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "The email address of the lead."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "The timestamp when the lead was created."
+        }
+      },
+      "required": ["name", "email", "createdAt"]
+    },
+    "User": {
+      "title": "User",
+      "description": "A registered user of the application.",
+      "type": "object",
+      "properties": {
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "The user's email address."
+        },
+        "isSubscribed": {
+          "type": "boolean",
+          "description": "Whether the user has an active subscription."
+        },
+        "subscriptionDate": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When the user subscribed."
+        }
+      },
+      "required": ["email"]
+    }
+  },
+  "firestore": {
+    "/leads/{leadId}": {
+      "schema": "Lead",
+      "description": "Collection of leads from the landing page."
+    },
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profile and subscription data."
+    }
+  }
+}
