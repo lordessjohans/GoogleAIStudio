@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Search, Upload, FileText, CheckCircle, AlertCircle, Loader2, Scale, ChevronRight, Info, Calendar, Plus, Trash2, Bell, TrendingUp, Lock, Gavel, Users, Mail, ArrowRight, ShieldCheck, Database, BarChart3, MessageCircle, X, Send } from 'lucide-react';
+import * as mammoth from 'mammoth';
+import { Search, Upload, FileText, CheckCircle, AlertCircle, Loader2, Scale, ChevronRight, Info, Calendar, Plus, Trash2, Bell, TrendingUp, Lock, Gavel, Users, Mail, ArrowRight, ShieldCheck, Database, BarChart3, MessageCircle, X, Send, CreditCard } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -8,6 +9,8 @@ import { searchCaseInfo, analyzeCaseDocument, generateReminders, chatWithAssista
 import { auth, db, googleProvider, handleFirestoreError, OperationType } from './firebase';
 import { signInWithPopup, signOut, onAuthStateChanged } from 'firebase/auth';
 import { collection, addDoc, getDocs, deleteDoc, doc, onSnapshot, query, orderBy, serverTimestamp, setDoc, updateDoc, getDoc } from 'firebase/firestore';
+
+import { SubscriptionManagement } from './components/SubscriptionManagement';
 
 // Error Boundary Component
 class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { hasError: boolean, errorInfo: string | null }> {
@@ -68,7 +71,7 @@ interface Lead {
   createdAt: any;
 }
 
-type Tab = 'guide' | 'tracker' | 'public-records' | 'crm';
+type Tab = 'guide' | 'tracker' | 'public-records' | 'crm' | 'subscription';
 
 export default function App() {
   return (
@@ -92,7 +95,9 @@ function AppContent() {
   const [isUploading, setIsUploading] = useState(false);
   const [result, setResult] = useState<CaseResult | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [isSubscribed, setIsSubscribed] = useState(true); // Default to true to bypass paywall
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [isSubscribed, setIsSubscribed] = useState(false);
+  const [subscriptionData, setSubscriptionData] = useState<any>(null);
   const [isCheckingOut, setIsCheckingOut] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -126,6 +131,16 @@ function AppContent() {
   const [isDataGovLoading, setIsDataGovLoading] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
+  const checkSubscription = () => {
+    if (!isSubscribed) {
+      setError('A subscription is required to use this feature. Please upgrade your plan.');
+      setActiveTab('subscription');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      return false;
+    }
+    return true;
+  };
+
   const scrollToBottom = () => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
@@ -150,14 +165,26 @@ function AppContent() {
               email: currentUser.email,
               isSubscribed: false,
               role: 'user',
-              createdAt: serverTimestamp()
+              createdAt: serverTimestamp(),
+              subscription: { status: 'free' }
             });
           }
+
+          // Listen for subscription changes
+          onSnapshot(userDocRef, (doc) => {
+            if (doc.exists()) {
+              const data = doc.data();
+              setSubscriptionData(data.subscription);
+              setIsSubscribed(data.subscription?.status === 'active');
+            }
+          });
         } catch (err) {
           console.error("Error checking/creating user profile:", err);
         }
       } else {
         setIsAdmin(false);
+        setIsSubscribed(false);
+        setSubscriptionData(null);
       }
     });
     return () => unsubscribe();
@@ -280,6 +307,7 @@ function AppContent() {
   const handleSearch = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!searchQuery.trim()) return;
+    if (!checkSubscription()) return;
 
     setIsSearching(true);
     setError(null);
@@ -298,6 +326,7 @@ function AppContent() {
 
   const handleIndividualSearch = async () => {
     if (!firstName.trim() || !lastName.trim()) return;
+    if (!checkSubscription()) return;
 
     setIsSearching(true);
     setError(null);
@@ -355,61 +384,111 @@ function AppContent() {
                        /^(how|what|why|where|when|who|can|is|are|do|does|help|tell|explain)/i.test(searchQuery.trim())) &&
                        !/\d/.test(searchQuery); // If it contains numbers, it might be a case number
 
+    // Detect if it's likely a name search (e.g., "John Doe" or "Jane Smith")
+    const words = searchQuery.trim().split(/\s+/);
+    const isLikelyName = words.length >= 2 && words.length <= 4 && !isQuestion && !isPublicRecords;
+
     if (isQuestion) {
       handleChat(undefined, searchQuery);
       setSearchQuery('');
+    } else if (isLikelyName) {
+      // If it looks like a name, use the individual search logic but through the universal bar
+      setIsSearching(true);
+      setError(null);
+      setResult(null);
+      try {
+        const content = await searchCaseInfo(searchQuery, selectedCaseType, jurisdiction);
+        setResult({ content, type: 'search' });
+      } catch (err) {
+        setError('Failed to find records for this name. Please try the Individual Search tab for more precision.');
+        console.error(err);
+      } finally {
+        setIsSearching(false);
+      }
     } else {
       handleSearch(undefined);
     }
   };
 
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-
+    
     // Validate file type
-    const supportedTypes = ['application/pdf', 'image/jpeg', 'image/png', 'image/webp'];
+    const supportedTypes = [
+      'application/pdf', 
+      'image/jpeg', 
+      'image/png', 
+      'image/webp',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'text/plain'
+    ];
+    
     if (!supportedTypes.includes(file.type)) {
-      setError('Unsupported file type. Please upload a PDF or an image (JPEG, PNG, WEBP).');
+      setError('Unsupported file type. Please upload a PDF, DOCX, TXT, or an image.');
       if (fileInputRef.current) fileInputRef.current.value = '';
       return;
     }
 
-    // Validate file size (e.g., 10MB limit)
+    // Validate file size (10MB limit)
     if (file.size > 10 * 1024 * 1024) {
       setError('File is too large. Please upload a document smaller than 10MB.');
       if (fileInputRef.current) fileInputRef.current.value = '';
       return;
     }
 
+    setSelectedFile(file);
+    setError(null);
+  };
+
+  const processDocument = async () => {
+    if (!selectedFile) return;
+    if (!checkSubscription()) return;
+
     setIsUploading(true);
     setError(null);
     setResult(null);
 
     try {
-      const reader = new FileReader();
-      reader.onload = async () => {
-        try {
-          const base64 = (reader.result as string).split(',')[1];
-          const content = await analyzeCaseDocument(base64, file.type);
-          setResult({ content, type: 'upload' });
-        } catch (err) {
-          setError('Failed to analyze the document. Ensure it is a clear PDF or image.');
-          console.error(err);
-        } finally {
+      if (selectedFile.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+        const arrayBuffer = await selectedFile.arrayBuffer();
+        const result = await mammoth.extractRawText({ arrayBuffer });
+        const content = await analyzeCaseDocument(result.value, selectedFile.type, false);
+        setResult({ content, type: 'upload' });
+      } else if (selectedFile.type === 'text/plain') {
+        const text = await selectedFile.text();
+        const content = await analyzeCaseDocument(text, selectedFile.type, false);
+        setResult({ content, type: 'upload' });
+      } else {
+        const reader = new FileReader();
+        reader.onload = async () => {
+          try {
+            const base64 = (reader.result as string).split(',')[1];
+            const content = await analyzeCaseDocument(base64, selectedFile.type, true);
+            setResult({ content, type: 'upload' });
+          } catch (err) {
+            setError('Failed to analyze the document. Ensure it is a clear PDF or image.');
+            console.error(err);
+          } finally {
+            setIsUploading(false);
+            setSelectedFile(null);
+            if (fileInputRef.current) fileInputRef.current.value = '';
+          }
+        };
+        reader.onerror = () => {
+          setError('Error reading file.');
           setIsUploading(false);
-          if (fileInputRef.current) fileInputRef.current.value = '';
-        }
-      };
-      reader.onerror = () => {
-        setError('Error reading file.');
-        setIsUploading(false);
-      };
-      reader.readAsDataURL(file);
+        };
+        reader.readAsDataURL(selectedFile);
+        return; // Exit early as FileReader is async
+      }
     } catch (err) {
-      setError('An unexpected error occurred during upload.');
-      setIsUploading(false);
+      setError('An unexpected error occurred during analysis.');
       console.error(err);
+    } finally {
+      setIsUploading(false);
+      setSelectedFile(null);
+      if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
 
@@ -481,6 +560,7 @@ function AppContent() {
     if (e) e.preventDefault();
     const message = overrideMessage || chatInput;
     if (!message.trim() || isChatLoading) return;
+    if (!checkSubscription()) return;
 
     const userMessage = message.trim();
     if (!overrideMessage) setChatInput('');
@@ -706,6 +786,16 @@ function AppContent() {
                 CRM
               </button>
             )}
+            <button 
+              onClick={() => setActiveTab('subscription')}
+              className={cn(
+                "px-4 py-1.5 rounded-full text-xs font-medium transition-all flex items-center gap-2",
+                activeTab === 'subscription' ? "bg-white shadow-sm text-[#1A1A1A]" : "text-[#9E9E9E] hover:text-[#1A1A1A]"
+              )}
+            >
+              <CreditCard className="w-3 h-3" />
+              Subscription
+            </button>
           </nav>
 
           <div className="hidden md:flex items-center gap-6 text-sm font-medium text-[#9E9E9E]">
@@ -917,6 +1007,8 @@ function AppContent() {
               )}
             </div>
           </motion.div>
+        ) : activeTab === 'subscription' ? (
+          <SubscriptionManagement />
         ) : activeTab === 'tracker' ? (
           <div className="space-y-8">
             {/* Tracker Content */}
@@ -1221,7 +1313,7 @@ function AppContent() {
                       {isSearching ? <Loader2 className="w-5 h-5 animate-spin" /> : (
                         <>
                           <Search className="w-5 h-5" />
-                          Search Individual Records
+                          Search Pending Cases & Records
                         </>
                       )}
                     </button>
@@ -1241,6 +1333,37 @@ function AppContent() {
                 <p className="text-[10px] text-[#9E9E9E] uppercase tracking-widest font-bold">Tip: Add a jurisdiction (e.g., "Los Angeles") for better person/case searches</p>
               </div>
 
+              {/* Search Guide */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-6 mb-8">
+                <div className="bg-[#F5F5F5]/50 p-4 rounded-2xl border border-[#E5E5E5]">
+                  <div className="flex items-center gap-2 mb-2">
+                    <Search className="w-3 h-3 text-[#1A1A1A]" />
+                    <h4 className="text-[10px] font-bold uppercase tracking-widest">Finding Pending Cases</h4>
+                  </div>
+                  <p className="text-[11px] text-[#9E9E9E] leading-relaxed">
+                    To find active or pending cases, include the full name and state. Jaxson will scan official court dockets and public filings.
+                  </p>
+                </div>
+                <div className="bg-[#F5F5F5]/50 p-4 rounded-2xl border border-[#E5E5E5]">
+                  <div className="flex items-center gap-2 mb-2">
+                    <Database className="w-3 h-3 text-[#1A1A1A]" />
+                    <h4 className="text-[10px] font-bold uppercase tracking-widest">Open Data Search</h4>
+                  </div>
+                  <p className="text-[11px] text-[#9E9E9E] leading-relaxed">
+                    Use the "Search Open Data" button to retrieve results from Data.gov and other public record repositories.
+                  </p>
+                </div>
+                <div className="bg-[#F5F5F5]/50 p-4 rounded-2xl border border-[#E5E5E5]">
+                  <div className="flex items-center gap-2 mb-2">
+                    <Scale className="w-3 h-3 text-[#1A1A1A]" />
+                    <h4 className="text-[10px] font-bold uppercase tracking-widest">Win Probability</h4>
+                  </div>
+                  <p className="text-[11px] text-[#9E9E9E] leading-relaxed">
+                    Jaxson analyzes historical outcomes for similar cases in your jurisdiction to provide a statistical success score.
+                  </p>
+                </div>
+              </div>
+
               <div className="flex flex-wrap justify-center gap-2 mt-2">
                 {['How do I file a civil complaint?', 'Find cases related to tenant rights', 'What is a summons?', 'Calculate my win probability'].map((q) => (
                   <button 
@@ -1257,41 +1380,96 @@ function AppContent() {
               </div>
             </section>
 
-            {/* Action Controls */}
-            <div className="grid md:grid-cols-2 gap-8 mb-12">
-              {/* Upload Card */}
-              <div className="bg-white p-8 rounded-3xl shadow-sm border border-[#E5E5E5] hover:shadow-md transition-shadow">
-                <div className="flex items-center gap-3 mb-6">
-                  <div className="w-8 h-8 bg-[#F5F5F5] rounded-full flex items-center justify-center">
-                    <Upload className="w-4 h-4 text-[#1A1A1A]" />
-                  </div>
-                  <h3 className="font-medium">Analyze Paperwork</h3>
+            {/* Document Analysis Section */}
+            <section className="bg-white p-10 rounded-[3rem] shadow-sm border border-[#E5E5E5] mb-12">
+              <div className="flex items-center gap-4 mb-8">
+                <div className="w-12 h-12 bg-[#F5F5F5] rounded-2xl flex items-center justify-center">
+                  <Upload className="w-6 h-6 text-[#1A1A1A]" />
                 </div>
+                <div>
+                  <h3 className="text-2xl font-medium">Document Analysis</h3>
+                  <p className="text-sm text-[#9E9E9E]">Upload legal documents (PDF, DOCX, TXT) for deep AI reasoning.</p>
+                </div>
+              </div>
+
+              <div className="grid md:grid-cols-2 gap-8 items-start">
                 <div 
                   onClick={() => fileInputRef.current?.click()}
-                  className="border-2 border-dashed border-[#E5E5E5] rounded-2xl p-8 text-center cursor-pointer hover:border-[#1A1A1A] transition-colors group"
+                  className={cn(
+                    "border-2 border-dashed rounded-[2rem] p-12 text-center cursor-pointer transition-all group relative overflow-hidden",
+                    selectedFile ? "border-[#1A1A1A] bg-[#F5F5F5]/30" : "border-[#E5E5E5] hover:border-[#1A1A1A] hover:bg-[#F5F5F5]/30"
+                  )}
                 >
                   <input
                     type="file"
                     ref={fileInputRef}
                     onChange={handleFileUpload}
                     className="hidden"
-                    accept=".pdf,image/*"
+                    accept=".pdf,.docx,.txt,image/*"
                   />
-                  {isUploading ? (
-                    <div className="flex flex-col items-center gap-2">
-                      <Loader2 className="w-8 h-8 animate-spin text-[#1A1A1A]" />
-                      <p className="text-sm text-[#9E9E9E]">Analyzing document...</p>
+                  {selectedFile ? (
+                    <div className="flex flex-col items-center gap-3">
+                      <div className="w-16 h-16 bg-white rounded-2xl shadow-sm flex items-center justify-center mb-2">
+                        <FileText className="w-8 h-8 text-[#1A1A1A]" />
+                      </div>
+                      <p className="text-sm font-bold truncate max-w-[200px]">{selectedFile.name}</p>
+                      <p className="text-[10px] text-[#9E9E9E] uppercase tracking-widest font-bold">
+                        {(selectedFile.size / 1024 / 1024).toFixed(2)} MB • Click to change
+                      </p>
                     </div>
                   ) : (
                     <>
-                      <FileText className="w-8 h-8 text-[#9E9E9E] mx-auto mb-3 group-hover:text-[#1A1A1A] transition-colors" />
-                      <p className="text-sm font-medium">Click to upload PDF or Image</p>
-                      <p className="text-xs text-[#9E9E9E] mt-1">Court notices, summons, or filings</p>
+                      <div className="w-16 h-16 bg-white rounded-2xl shadow-sm flex items-center justify-center mx-auto mb-6 group-hover:scale-110 transition-transform">
+                        <Upload className="w-8 h-8 text-[#9E9E9E] group-hover:text-[#1A1A1A] transition-colors" />
+                      </div>
+                      <p className="text-sm font-bold mb-1">Click or drag to upload</p>
+                      <p className="text-xs text-[#9E9E9E]">PDF, DOCX, TXT or Images (Max 10MB)</p>
                     </>
                   )}
                 </div>
+
+                <div className="space-y-6">
+                  <div className="bg-[#F5F5F5]/50 p-6 rounded-2xl border border-[#E5E5E5]">
+                    <h4 className="text-[10px] font-bold uppercase tracking-widest text-[#9E9E9E] mb-4">What we analyze</h4>
+                    <ul className="space-y-3">
+                      {[
+                        'Case numbers & parties involved',
+                        'Key dates & procedural deadlines',
+                        'Statistical win probability',
+                        'Actionable next steps & checklists',
+                        'Direct e-filing portal links'
+                      ].map((item, i) => (
+                        <li key={i} className="flex items-center gap-3 text-xs text-[#1A1A1A]">
+                          <div className="w-1.5 h-1.5 bg-[#1A1A1A] rounded-full" />
+                          {item}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+
+                  <button
+                    onClick={processDocument}
+                    disabled={!selectedFile || isUploading}
+                    className="w-full py-4 bg-[#1A1A1A] text-white rounded-2xl font-bold hover:bg-[#333] transition-all flex items-center justify-center gap-3 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-[#1A1A1A]/10"
+                  >
+                    {isUploading ? (
+                      <>
+                        <Loader2 className="w-5 h-5 animate-spin" />
+                        Analyzing Document...
+                      </>
+                    ) : (
+                      <>
+                        <ShieldCheck className="w-5 h-5" />
+                        Analyze & Generate Report
+                      </>
+                    )}
+                  </button>
+                </div>
               </div>
+            </section>
+
+            {/* Action Controls */}
+            <div className="grid md:grid-cols-1 gap-8 mb-12">
 
               {/* AI Assistant Card */}
               <div className="bg-white p-8 rounded-3xl shadow-sm border border-[#E5E5E5] hover:shadow-md transition-shadow">
